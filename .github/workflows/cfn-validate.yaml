@@ -1,0 +1,76 @@
+name: CloudFormation Validate
+
+on:
+  workflow_call:
+    inputs:
+      issue-number:
+        description: 'Specifies the GitHub Issue Number.'
+        required: true
+        type: string
+    outputs:
+      issue-number:
+        description: "Issue id associated with the feature branch"
+        value: ${{ jobs.validate.outputs.issue-number }}
+
+permissions:
+  id-token: write                       # This is required for aws oidc connection
+  contents: read                        # This is required for actions/checkout
+  pull-requests: write                  # This is required for gh bot to comment PR
+
+jobs:
+  validate:
+    name: "Validate Templates"
+    outputs:
+      issue-number: ${{ steps.pass-issue-number.outputs.issue-number }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - name: Print and issue number to next step
+        id: pass-issue-number
+        run: |
+          echo "issue-number: ${{ inputs.issue-number }}"
+          echo "issue-number=`echo ${{ inputs.issue-number }}`" >> $GITHUB_OUTPUT
+
+      - name: Git checkout
+        id: git-checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch base branch
+        run: |
+            git fetch origin main:main
+
+      - name: Get modified files
+        run: |
+          # List modified files between the base branch and the current branch
+          git diff --name-only origin/main HEAD| grep -v 'github/workflows/'|grep '.yaml' > ${{ github.workspace }}/modified_files.txt
+          # Print the files to the console
+          echo "Modified files:"
+          cat ${{ github.workspace }}/modified_files.txt
+
+      - name: Configure AWS credentials from AWS account
+        id: aws-config
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          role-to-assume: ${{ vars.DEVL_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: github-aws-cfn-oidc
+
+      - name: Validate CFN Templates
+        id: validate-cfn
+        run: |
+          echo "Validate CFN Templates"
+          cd ${{ github.workspace }}
+          # Loop through the modified files and validate them
+          for file in $(cat ${{ github.workspace }}/modified_files.txt);do
+            echo "Validating $file"
+            aws cloudformation validate-template --template-body file://$file
+          done
+
+      - name: CloudFormation Validate Status
+        id: validate-status
+        if: steps.validate-cfn.outcome == 'failure'
+        run: exit 1

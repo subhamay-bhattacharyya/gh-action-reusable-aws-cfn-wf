@@ -1,0 +1,43 @@
+name: Run Checov Scan
+
+on:
+  workflow_call:
+    inputs:
+      soft-fail:
+        description: 'Specifies whether to return an error code if there are failed checks.'
+        required: false
+        type: boolean
+        default: true
+permissions:
+  contents: read                        # This is required for actions/checkout
+
+jobs:
+  checov-scan:
+    name: Run Checkov Scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}/cfn
+
+    steps:
+      - name: Git checkout
+        id: git-checkout
+        uses: actions/checkout@v4
+
+      - name: Run Checkov Scan
+        id: checkov-scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: ${{ github.workspace }}/cfn
+          soft_fail: ${{ inputs.soft-fail }} # optional: do not return an error code if there are failed checks
+          # check: CKV_AWS_1 # optional: run only a specific check_id. can be comma separated list
+          # skip_check: CKV_AWS_2 # optional: skip a specific check_id. can be comma separated list
+          # quiet: true # optional: display only failed checks
+          framework: cloudformation # optional: run only on a specific infrastructure {cloudformation,terraform,kubernetes,all}
+          # output_format: sarif # optional: the output format, one of: cli, json, junitxml, github_failed_only, or sarif. Default: sarif
+          # download_external_modules: true # optional: download external terraform modules from public git repositories and terraform registry
+          # log_level: DEBUG # optional: set log level. Default WARNING
+          # config_file: path/this_file
+          # baseline: cloudformation/.checkov.baseline # optional: Path to a generated baseline file. Will only report results not in the baseline.
+          # container_user: 1000 # optional: Define what UID and / or what GID to run the container under to prevent permission issues

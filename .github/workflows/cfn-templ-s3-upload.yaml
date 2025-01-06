@@ -1,0 +1,53 @@
+name: Upload CFN Templates to S3
+
+on:
+  workflow_call:
+    inputs:
+      aws-region:
+        description: 'Specifies the AWS Region.'
+        required: true
+        type: string
+      aws-role-arn:
+        description: 'Specifies the AWS IAM Role arn.'
+        required: true
+        type: string
+      aws-cfn-template-bucket:
+        description: 'Specifies the AWS S3 bucket name.'
+        required: true
+        type: string
+      kms-key-arn:  
+        description: 'Specifies the AWS KMS Key ARN.'
+        required: true
+        type: string
+permissions:
+  id-token: write # This is required for aws oidc connection
+
+jobs:
+  s3-upload:
+    name: "Upload CFN Templates to S3"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      # Checkout the repository code
+      - name: Checkout code
+        id: git-checkout
+        uses: actions/checkout@v4
+
+      # Configure AWS credentials
+      - name: Configure AWS credentials from AWS account
+        id: aws-config
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: github-aws-cfn-oidc
+
+      # Upload the stack templates to S3
+      - name: Upload the stack templates to S3
+        run: |
+          aws s3 sync ${{ github.workspace }}/cfn-templates/ s3://${{ inputs.aws-cfn-template-bucket }} --sse "aws:kms" \
+          --sse-kms-key-id ${{ inputs.kms-key-arn }} --storage-class GLACIER_IR

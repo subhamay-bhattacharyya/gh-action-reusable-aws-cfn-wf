@@ -1,0 +1,70 @@
+name: "Run Infracost"
+
+on:
+  workflow_call:
+    secrets:
+      infracost-api-key:
+        required: true
+
+permissions:
+  id-token:                             write # This is required for aws oidc connection
+  contents:                             write # This is required for actions/checkout
+  issues:                               write
+  pull-requests:                        write # This is required for gh bot to comment PR
+
+jobs:
+  infracost-pull-request-checks:
+    name: Infracost Pull Request Checks
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
+    runs-on: ubuntu-latest
+    environment: devl
+    permissions:
+      contents: read
+      pull-requests: write # Required to post comments
+    steps:
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.infracost-api-key }}
+
+      # Checkout the base branch of the pull request (e.g. main/master).
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+
+      - name: List the files in the workspace
+        run: |
+          cd ${{ github.workspace }}
+          ls -alrt
+
+      # Generate Infracost JSON file as the baseline.
+      - name: Generate Infracost cost estimate baseline
+        run: |
+          infracost breakdown --config-file=${{ github.workspace }}/infracost.yaml \
+                              --format=json \
+                              --out-file=/tmp/infracost-base.json
+
+      # Checkout the current PR branch so we can create a diff.
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      # Generate an Infracost diff and save it to a JSON file.
+      - name: Generate Infracost diff
+        run: |
+          infracost diff --config-file=${{ github.workspace }}/infracost.yaml \
+                          --format=json \
+                          --compare-to=/tmp/infracost-base.json \
+                          --out-file=/tmp/infracost.json
+
+      - name: Post Infracost comment
+        run: |
+            curl -H "Authorization: token ${{ github.token }}" \
+            -s https://gist.githubusercontent.com/bsubhamay/b5f029403a62736be30efb19310571f6/raw > ${{ github.workspace }}/policy/cost.rego
+            echo "=========================================== cost.rego ======================================================"
+            cat ${{ github.workspace }}/policy/cost.rego
+            echo "============================================================================================================"
+            infracost comment github --path=/tmp/infracost.json \
+                                     --repo=$GITHUB_REPOSITORY \
+                                     --GITHUB_TOKEN=${{ github.token }} \
+                                     --pull-request=${{ github.event.pull_request.number }} \
+                                     --behavior=update \
+                                     --policy-path ${{ github.workspace }}/policy/cost.rego

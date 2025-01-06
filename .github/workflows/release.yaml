@@ -1,0 +1,42 @@
+name: Create Release
+
+on:
+  workflow_call:
+permissions:
+  id-token: write                       # This is required for aws oidc connection
+  pull-requests: write                  # This is required for gh bot to comment PR
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '20'
+
+      - name: Prepare Release
+        id: prepare-release
+        run: |
+          echo "release=`date +%Y%m%d.%H%M%S`" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create-release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag_name: "Rel.${{ steps.prepare-release.outputs.release }}"
+          release_name: "Release ${{ steps.prepare-release.outputs.release }}"
+          body: |
+            Changes in this Release
+              - Commit Message: ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: false
