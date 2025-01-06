@@ -1,0 +1,50 @@
+name: "Destroy"
+
+on:
+  workflow_call:
+    inputs:
+      deploy-reviewer-test:
+        description: Specifies the GitHub User Id who can approve test deployment.
+        required: true
+        type: number
+      deploy-reviewer-prod:
+        description: Specifies the GitHub User Id who can approve prod deployment.
+        required: true
+        type: number
+      pr-approver:
+        description: Specifies the GitHub User who can approve a Pull Request.
+        required: true
+        type: string
+
+permissions:
+  id-token: write                       # This is required for aws oidc connection
+  contents: read                        # This is required for actions/checkout
+  pull-requests: write                  # This is required for gh bot to comment PR
+
+jobs:
+  _1-devl:
+    name: "Terraform Destroy (devl)"
+    uses: ./.github/workflows/tf-destroy.yaml
+    with:
+      github-env: devl
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME }}
+  _2-test:
+    name: "Terraform Destroy (test)"
+    needs: [ _1-devl ]
+    uses: ./.github/workflows/tf-destroy.yaml
+    with:
+      github-env: test
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.TEST_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.TEST_AWS_TF_STATE_BUCKET_NAME }}
+  _3-prod:
+    name: "Terraform Destroy (prod)"
+    needs: [ _2-test ]
+    uses: ./.github/workflows/tf-destroy.yaml
+    with:
+      github-env: prod
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.PROD_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.PROD_AWS_TF_STATE_BUCKET_NAME }}

@@ -1,0 +1,65 @@
+name: Create Pull Request
+
+on:
+  workflow_call:
+    secrets:
+      git-token:
+        required: true
+        description: 'Specifies the GitHub Token for the repository.'
+permissions:
+  id-token: write                       # This is required for aws oidc connection
+  pull-requests: write                  # This is required for gh bot to comment PR
+  contents: write                       # This is required for actions/checkout
+jobs:
+  pull-request:
+    name: "Create Pull Request"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    outputs:
+      pr-body: ${{ steps.prepare-pr-body.outputs.body }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Prepare Pull Request Body
+      id: prepare-pr-body
+      run: |
+        rm -rf ${{ github.workspace }}/latest-change-log.md
+        awk '/START-LATEST/{flag=1;next}/END-LATEST/{flag=0}flag' CHANGELOG.md > ${{ github.workspace }}/latest-change-log.md
+
+        echo "<html>"                   >> ${{ github.workspace }}/pr-body.md
+        echo "  <body>"                 >> ${{ github.workspace }}/pr-body.md
+        echo "    <table>"              >> ${{ github.workspace }}/pr-body.md
+        echo "    <tr><td>Pull Request request created to merge <b>${{ github.ref_name }}</b> with <b>main</b></td></tr>" >> ${{ github.workspace }}/pr-body.md
+        while IFS= read -r line
+        do
+            echo "    <tr><td>${line}</td></tr>"|sed 's/#####/💡/g'    >> pr-body.md
+        done < ${{ github.workspace }}/latest-change-log.md|tail -n +2
+        echo "    </table>"             >> ${{ github.workspace }}/pr-body.md
+        echo "  </body>"                >> ${{ github.workspace }}/pr-body.md
+        echo "</html>"                  >> ${{ github.workspace }}/pr-body.md
+        echo "************** Pull Request Body ***************"
+        cat ${{ github.workspace }}/pr-body.md
+
+    - name: Read the Pull Request Body
+      id: read-pr-body
+      uses: andstor/file-reader-action@v1.0.0
+      with:
+        path:  ${{ github.workspace }}/pr-body.md
+
+    - name: Create Pull Request
+      id: create-pr
+      uses: octokit/request-action@v2.4.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.git-token }}
+      with:
+        route: POST /repos/{owner}/{repo}/pulls
+        owner: ${{ github.repository_owner }}
+        repo: ${{ github.event.repository.name }}
+        title: "Merge ${{ github.ref_name || github.head_ref }} with main"
+        head: ${{ github.ref_name || github.head_ref }}
+        base: main
+        body: "${{ steps.read-pr-body.outputs.contents }}"

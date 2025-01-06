@@ -1,0 +1,199 @@
+name: CI/CD Pipeline for Terraform
+
+on:
+  workflow_call:
+    inputs:
+      deploy-reviewer-test:
+        description: Specifies the GitHub User Id who can approve test deployment.
+        required: true
+        type: number
+      deploy-reviewer-prod:
+        description: Specifies the GitHub User Id who can approve prod deployment.
+        required: true
+        type: number
+      pr-approver:
+        description: Specifies the GitHub User who can approve a Pull Request.
+        required: true
+        type: string
+    secrets:
+      git-token:
+        required: true
+        description: 'Specifies the GitHub Token for the repository.'
+
+permissions:
+  id-token: write                       # This is required for aws oidc connection
+  contents: write                       # This is required for actions/checkout
+  pull-requests: write                  # This is required for gh bot to comment PR
+  issues: write
+
+jobs:
+  _1-setup:
+    uses: ./.github/workflows/setup-repository.yaml
+    with:
+      deploy-reviewer-test: ${{ inputs.deploy-reviewer-test }}
+      deploy-reviewer-prod: ${{ inputs.deploy-reviewer-prod }}
+      pr-approver: ${{ inputs.pr-approver }}
+      test-env: true
+      prod-env: true
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _2-1-1-tf-lint:
+    needs:
+      - _1-setup
+    if: startsWith(github.ref, 'refs/heads/feature')
+    uses: ./.github/workflows/tf-lint.yaml
+    with:
+      tflint-ver: ${{ vars.TF_LINT_VERSION }}
+  _2-1-2-validate:
+    needs:
+      - _1-setup
+    if: startsWith(github.ref, 'refs/heads/feature')
+    uses: ./.github/workflows/tf-validate.yaml
+    with:
+      terraform-ver: ${{ vars.TERRAFORM_VERSION }}
+      issue-number: ${{ needs._1-setup.outputs.issue-number }}
+  _2-2-tf-plan-devl:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - _1-setup
+    uses: ./.github/workflows/tf-plan.yaml
+    with:
+      github-env: devl
+      tfvar-file: devl.terraform.tfvars
+      issue-number: ${{ needs._1-setup.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME}}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _2-3-tf-plan-test:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - _1-setup
+    uses: ./.github/workflows/tf-plan.yaml
+    with:
+      github-env: test
+      tfvar-file: test.terraform.tfvars
+      issue-number: ${{ needs._1-setup.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.TEST_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.TEST_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _2-4-tf-plan-prod:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - _1-setup
+    uses: ./.github/workflows/tf-plan.yaml
+    with:
+      github-env: prod
+      tfvar-file: prod.terraform.tfvars
+      issue-number: ${{ needs._1-setup.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.PROD_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.PROD_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _3-1-tf-plan-feature:
+    needs:
+      - _2-1-1-tf-lint
+      - _2-1-2-validate
+    if: ${{ startsWith(github.ref, 'refs/heads/feature') }}
+    uses: ./.github/workflows/tf-plan.yaml
+    with:
+      github-env: feature
+      terraform-ver: ${{ vars.TERRAFORM_VERSION }}
+      tfvar-file: devl.terraform.tfvars
+      issue-number: ${{ needs._2-1-2-validate.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _3-2-tf-apply-devl:
+    needs:
+      - _2-2-tf-plan-devl
+    if: ${{ startsWith(github.ref, 'refs/heads/main') }}
+    uses: ./.github/workflows/tf-apply.yaml
+    with:
+      github-env: devl
+      tfvar-file: devl.terraform.tfvars
+      issue-number: ${{ needs._2-2-tf-plan-devl.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _3-3-tf-apply-test:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - _3-2-tf-apply-devl
+      - _2-3-tf-plan-test
+    uses: ./.github/workflows/tf-apply.yaml
+    with:
+      github-env: test
+      tfvar-file: test.terraform.tfvars
+      issue-number: ${{ needs._2-3-tf-plan-test.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.TEST_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.TEST_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _3-4-tf-apply-prod:
+    needs:
+      - _2-4-tf-plan-prod
+      - _3-3-tf-apply-test
+    if: ${{ startsWith(github.ref, 'refs/heads/main') }}
+    uses: ./.github/workflows/tf-apply.yaml
+    with:
+      github-env: prod
+      tfvar-file: prod.terraform.tfvars
+      issue-number: ${{ needs._2-4-tf-plan-prod.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.PROD_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.PROD_AWS_TF_STATE_BUCKET_NAME }}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _4-1-tf-apply-feature:
+    needs:
+      - _3-1-tf-plan-feature
+    if: ${{ startsWith(github.ref, 'refs/heads/feature') }}
+    uses: ./.github/workflows/tf-apply.yaml
+    with:
+      github-env: feature
+      tfvar-file: devl.terraform.tfvars
+      issue-number: ${{ needs._3-1-tf-plan-feature.outputs.issue-number }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME}}
+    secrets:
+      git-token: ${{ secrets.git-token }}
+  _5-1-tf-destroy-feature:
+    needs:
+      - _4-1-tf-apply-feature
+    if: ${{ startsWith(github.ref, 'refs/heads/feature') }}
+    uses: ./.github/workflows/tf-destroy.yaml
+    with:
+      github-env: feature
+      terraform-ver: ${{ vars.TERRAFORM_VERSION }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME}}
+  _6-1-create-release:
+    needs:
+      - _5-1-tf-destroy-feature
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/release.yaml
+  _7-1-create-pr:
+    needs:
+      - _6-1-create-release
+    uses: ./.github/workflows/create-pr.yaml
+    with:
+      pr-title: Pull Request to merge ${{ github.ref_name }} with main
+      pr-approver: ${{ inputs.pr-approver }}
+      aws-region: ${{ vars.AWS_REGION }}
+      aws-role-arn: ${{ vars.DEVL_AWS_ROLE_ARN }}
+      aws-tf-state-bucket-name: ${{ vars.DEVL_AWS_TF_STATE_BUCKET_NAME}}

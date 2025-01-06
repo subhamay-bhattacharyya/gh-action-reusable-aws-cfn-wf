@@ -1,0 +1,20 @@
+#### Version: 1.0.0
+Initial release of the GitHub Reusable Workflow Templates repository.
+Version: 1.0.0
+Author: Subhamay Bhattacharyya
+Created: 05-Jan-2025
+Updated: 
+Description: This repositoy contains the reusable GitHub workflow templates.
+
+## Features
+- This repository contains the reusable GitHub workflow templates for.
+. Validate CloudFormation templates
+. Create Pipeline
+. Checkov Scan
+. Create Pull Request
+. Drift Detection
+. Infracost
+. Release
+. Setup Repository
+. Upload CloudFormation templates to S3 bucket
+. Destroy the stack

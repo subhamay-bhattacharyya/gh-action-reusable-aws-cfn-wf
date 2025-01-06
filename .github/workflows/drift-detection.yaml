@@ -1,0 +1,142 @@
+name: Terraform Plan
+
+on:
+  workflow_call:
+    inputs:
+      github-env:
+        description: 'Specifies the GitHub deployment environment.'
+        required: false
+        type: string
+        default: "devl"
+      terraform-ver:
+        description: 'Specifies version of Terraform to use. e.g: 1.1.0 Default=latest.'
+        required: false
+        type: string
+        default: latest
+      tfvar-file:
+        description: 'Specifies the environment specific tfvar file e.g: devl.terraform.tfvars'
+        required: true
+        type: string
+        default: devl.terraform.tfvars
+      aws-region:
+        description: 'Specifies the AWS Region.'
+        required: true
+        type: string
+      aws-role-arn:
+        description: 'Specifies the AWS IAM Role arn.'
+        required: true
+        type: string
+      aws-tf-state-bucket-name:
+        description: 'Specifies the AWS S3 bucket name.'
+        required: true
+        type: string
+    secrets:
+      git-token:
+        required: true
+        description: 'Specifies the GitHub Token for the repository.'
+
+permissions:
+  id-token: write # This is required for aws oidc connection
+  contents: read # This is required for actions/checkout
+  pull-requests: write # This is required for gh bot to comment PR
+
+jobs:
+  plan:
+    name: "TF Plan (${{ inputs.github-env }})"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.github-env }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+
+      - name: Git checkout
+        id: git-checkout
+        uses: actions/checkout@v4
+
+
+      - name: Add GitHub attributes to terraform.tfvars file
+        id: add-github-attributes
+        run: |
+          cd tf
+          mv params/${{ inputs.tfvar-file }} terraform.tfvars
+          echo -e '######################################## GitHub Context Variables  #################################'>> terraform.tfvars
+          echo -e 'github-url           = "${{ github.repositoryUrl }}"'                                                >> terraform.tfvars
+          echo -e 'github-ref           = "${{ github.ref }}"'                                                          >> terraform.tfvars
+          echo -e 'github-sha           = "${{ github.sha }}"'                                                          >> terraform.tfvars
+          echo -e 'github-wf-run-num    = "${{ github.run_number }}"'                                                   >> terraform.tfvars
+          echo -e 'github-repo          = "${{ github.event.repository.name }}"'                                        >> terraform.tfvars
+          echo "=========================================== terraform.tfvars ==========================================="
+          cat terraform.tfvars
+
+      - name: Configure AWS credentials from AWS account
+        id: aws-config
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: github-aws-terraform-oidc
+
+      - name: Configure and cache Terraform plugin
+        id: plugin
+        uses: subhamay-bhattacharyya/terraform-plugin@main
+        with:
+          tf-version: ${{ inputs.terraform-ver }}
+          caching: 'true'
+
+      - name: Output Cache used
+        id: cache-used
+        run: echo "Cache used? ${{ steps.plugin.outputs.used-cache }}"
+
+      - name: Terraform Init
+        id: init
+        env:
+          AWS_BUCKET_NAME: ${{ inputs.aws-tf-state-bucket-name }}
+          AWS_BUCKET_KEY_NAME: ${{ github.event.repository.name }}
+        run: |
+          cd ${{ github.workspace }}/tf
+          terraform fmt -recursive
+          terraform init -backend-config="bucket=${{ inputs.aws-tf-state-bucket-name }}" -backend-config="key=${{ github.event.repository.name }}/terraform.tfstate" -backend-config="region=${{ inputs.aws-region }}"
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ github.workspace }}/tf
+          terraform plan -out=${{ github.workspace }}/tf/terraform.tfplan -var-file=terraform.tfvars -no-color
+
+      - name: Check for Drift
+        id: drift-check
+        run: |
+          cd ${{ github.workspace }}/tf
+          terraform plan -refresh-only -out=terraform.tfplan -var-file=terraform.tfvars -no-color
+          terraform show -json terraform.tfplan > refresh_only.json
+          echo "-------------------------"
+          cat refresh_only.json
+          echo "-------------------------"
+          terraform show -json terraform.tfplan | jq -r '.resource_changes[].change.actions[]' | grep -v no-op | wc -l
+
+
+          /*
+          terraform show -no-color -json > tf.json
+          terraform show -no-color -json ${{ github.workspace }}/tf/terraform.tfplan > ${{ github.workspace }}/tf/tfplan.json
+          drift=$(terraform show -no-color -json ${{ github.workspace }}/tf/terraform.tfplan | jq -r '.resource_changes[].change.actions[]' | grep -v no-op | wc -l)
+          if [ $drift -gt 0 ]; then
+            echo "Drift detected"
+            echo "change-detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "No Drift detected"
+            echo "change-detected=false" >> $GITHUB_OUTPUT
+          fi*/
+
+      - name: Create an issue if drift detected
+        id: create-issue
+        if: ${{ steps.drift-check.outputs.change-detected }} == 'true'
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: POST /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/issues
+          title: "Terraform Drift Detected"
+          body: |
+            Drift has been detected in the Terraform-managed infrastructure. Please review the plan output and take necessary actions.

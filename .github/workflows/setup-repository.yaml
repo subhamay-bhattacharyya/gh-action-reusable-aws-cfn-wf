@@ -1,0 +1,189 @@
+name: Setup Repository
+run-name: Setup Repository
+
+on:
+  workflow_call:
+    inputs:
+      deploy-reviewer-test:
+        description: 'Specifies the GitHub User Id of the deployment reviewer-1.'
+        required: true
+        type: string
+      deploy-reviewer-prod:
+        description: 'Specifies the GitHub User Id of the deployment reviewer-2.'
+        required: true
+        type: string
+      pr-approver:
+        description: 'Specifies the GitHub User who can approve a Pull Request.'
+        required: true
+        type: string
+      test-env:
+        description: 'Specifies if the test environment will be created.'
+        required: true
+        type: boolean
+      prod-env:
+        description: 'Specifies if the prod environment will be created.'
+        required: true
+        type: boolean
+    outputs:
+      issue-number:
+        description: "Issue id associated with the feature branch"
+        value: ${{ jobs.setup-repo.outputs.issue-number }}
+    secrets:
+      git-token:
+        required: true
+        description: 'Specifies the GitHub Token for the repository.'
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  setup-repo:
+    name: Setup Repository
+    outputs:
+      issue-number: ${{ steps.get-repo-details.outputs.issue-number }}
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Get Repository Details
+        id: get-repo-details
+        run: |
+          echo "commit message   = ${{ github.event.commits[0].message }}"
+          echo "issue-number=`echo ${{ github.event.commits[0].message }}|cut -d':' -f1|cut -d'-' -f2|tr -d '0'`" >> $GITHUB_OUTPUT
+
+      - name: List Environments
+        id: list-environments
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: GET /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/environments
+          mediaType: |
+            format: raw
+
+      - name: Get Issue
+        id: get-branch-issue
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: GET /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/issues/${{ steps.get-repo-details.outputs.issue-number }}
+          mediaType: |
+            format: raw
+
+      - name: Print Repository Details
+        id: print-repository-details
+        if: always()
+        run: |
+          echo "GitHub event                 : ${{ github.event_name }}"
+          echo "Issue Number                 : ${{ steps.get-repo-details.outputs.issue-number }}"
+          echo "Issue Title                  : ${{ fromJSON(steps.get-branch-issue.outputs.data).title }}"
+          echo "Issue Body                   : ${{ fromJSON(steps.get-branch-issue.outputs.data).body }}"
+          echo "Issue Closed At              : ${{ fromJSON(steps.get-branch-issue.outputs.data).closed_at }}"
+          echo "Repository Environments      : ${{ steps.list-environments.outputs.data }}"
+          echo "Environment Count            : ${{ fromJSON(steps.list-environments.outputs.data).total_count }}"
+
+      - name: Cancel the workflow if no open issue is created for the feature branch
+        id: cancel-workflow-run
+        if: ${{ (fromJSON(steps.get-branch-issue.outputs.data).title == '') || (fromJSON(steps.get-branch-issue.outputs.data).body == '') ||
+                (fromJSON(steps.get-branch-issue.outputs.data).closed_at != null) }}
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: POST /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/actions/runs/${{ github.run_id }}/cancel
+          mediaType: |
+            format: raw
+
+      - name: Check if there is an open issue created for the feature branch
+        if: ${{ cancelled() }}
+        uses: actions/github-script@v3
+        with:
+          script: |
+              core.setFailed('No open issue available for this feature branch. Create an issue and try again!')
+
+      - name: Set delete branch on merge
+        id: update-repository
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: PATCH /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          mediaType: |
+            format: raw
+          delete_branch_on_merge: true
+
+      - name: Create Development Environment
+        id: create-devl-env
+        if: ${{ fromJSON(steps.list-environments.outputs.data).total_count == '' }}
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: PUT /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/environments/devl
+          mediaType: |
+            format: raw
+
+      - name: Create Test Environment
+        id: create-test-env
+        if: ${{ (fromJSON(steps.list-environments.outputs.data).total_count == '') && (inputs.test-env == true) }}
+        uses: octokit/request-action@v2.x
+        with:
+          route: PUT /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/environments/test
+          reviewers: '[{"type":"User","id": ${{ inputs.deploy-reviewer-test}} }]'
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+
+      - name: Create Production Environment
+        id: create-prod-env
+        if: ${{ (fromJSON(steps.list-environments.outputs.data).total_count == '') && (inputs.prod-env == true) }}
+        uses: octokit/request-action@v2.x
+        with:
+          route: PUT /repos/{owner}/{repo}/environments/{environment_name}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          environment_name: prod
+          wait_timer: 5
+          reviewers: '[{"type":"User","id": ${{ inputs.deploy-reviewer-prod }} }]'
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+
+      - name: Set Branch Protection Rule
+        id: set-branch-protection
+        uses: octokit/request-action@v2.x
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: PUT /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/branches/main/protection
+          enforce_admins: true
+          required_pull_request_reviews: |
+                    {
+                        "dismissal_restrictions":{},
+                        "dismiss_stale_reviews":true,
+                        "require_code_owner_reviews":true,
+                        "required_approving_review_count":1
+                    }
+          required_status_checks: |
+                    {
+                      "strict": false,
+                      "contexts": []
+                    }
+          restrictions: |
+                    {
+                        "users":[],
+                        "teams":[]
+                    }
+
+      - name: Add Repository Collaborator
+        id: add-repo-collaborator
+        uses: octokit/request-action@v2.4.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+        with:
+          route: PUT /repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/collaborators/${{ inputs.pr-approver }}
+          mediaType: |
+            format: raw
+          body: |
+            {
+              "permission": "maintain"
+            }
